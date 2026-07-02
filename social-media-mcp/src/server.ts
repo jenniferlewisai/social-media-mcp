@@ -24,34 +24,81 @@ const PlatformSchema = z.enum(PLATFORMS);
 // ---------------------------------------------------------------------------
 // Image input: accepts either a plain public URL, or a ChatGPT file
 // reference. When a tool marks a field in _meta["openai/fileParams"],
-// ChatGPT populates that field with { download_url, file_id } for any file
-// the user uploaded or any image the model generated in the conversation —
-// this is the mechanism, per OpenAI's Apps SDK reference, for handing a
-// real file to an MCP tool instead of a URL string the model made up.
-// download_url is a temporary link scoped to ChatGPT's own infrastructure,
-// not a public URL Blotato's servers can fetch — so resolveImageUrl()
-// downloads it here and re-uploads the bytes to the provider's own storage
-// to get a URL that's actually publicly fetchable.
+// ChatGPT is supposed to populate that field with { download_url, file_id }
+// for any file the user uploaded/attached or any image the model generated
+// in the conversation — this is the mechanism, per OpenAI's Apps SDK
+// reference, for handing a real file to an MCP tool instead of a URL string
+// the model made up. download_url is a temporary link scoped to ChatGPT's
+// own infrastructure, not a public URL Blotato's servers can fetch — so
+// resolveImageUrl() downloads it here and re-uploads the bytes to the
+// provider's own storage to get a URL that's actually publicly fetchable.
+//
+// IMPORTANT — schema is intentionally z.any(), not a strict union:
+// the fileParams download_url/file_id substitution is NOT 100% reliable in
+// practice. OpenAI's own developer community has documented cases where a
+// strictly-typed union field (string().url() | object) causes the tool call
+// to be rejected outright, and/or the raw internal path of the generated
+// image (e.g. "/mnt/data/foo.png") leaks through unsubstituted. The fix
+// confirmed by OpenAI staff/community is to type file-param fields as
+// z.any() so the call always reaches the server, and validate the actual
+// shape at runtime instead — which is what resolveImageUrl() does below,
+// with a clear, actionable error message when the image genuinely can't be
+// resolved (instead of an opaque schema-validation rejection).
 // ---------------------------------------------------------------------------
 const ImageFileRefSchema = z.object({
   download_url: z.string().url(),
-  file_id: z.string().optional()
+  file_id: z.string().optional(),
+  mime_type: z.string().optional(),
+  file_name: z.string().optional()
 });
-const ImageInputSchema = z.union([z.string().url(), ImageFileRefSchema]).optional();
-type ImageInput = z.infer<typeof ImageInputSchema>;
+const ImageInputSchema = z.any().optional();
+type ImageInput = unknown;
+
+function isPublicHttpUrl(value: string): boolean {
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 async function resolveImageUrl(image: ImageInput, provider: SocialProvider): Promise<string[]> {
-  if (!image) return [];
+  if (image === undefined || image === null || image === "") return [];
 
   // Already a plain public URL (manually supplied, or from an earlier step) — use as-is.
-  if (typeof image === "string") return [image];
+  if (typeof image === "string") {
+    if (isPublicHttpUrl(image)) return [image];
+
+    // ChatGPT occasionally fails to substitute the fileParams object and
+    // instead hands us the raw internal path of a generated/attached image
+    // (e.g. "/mnt/data/foo.png" or a "sandbox:" URI). That path only exists
+    // inside ChatGPT's own sandbox — this server has no way to fetch it —
+    // so fail loudly with guidance instead of a confusing network error or
+    // silently dropping the image.
+    throw new Error(
+      `Received "${image}" as the image, which is neither a public URL nor a ChatGPT file reference. This ` +
+        `usually means ChatGPT wasn't able to hand over the generated/attached image as a file (a known Apps SDK ` +
+        `limitation for inline-generated images). Try attaching the image as a file in the chat rather than ` +
+        `leaving it inline, or pass a publicly accessible image URL instead.`
+    );
+  }
+
+  const parsed = ImageFileRefSchema.safeParse(image);
+  if (!parsed.success) {
+    throw new Error(
+      `Received an image value in a shape this server doesn't recognize (expected a public URL string, or ` +
+        `{ download_url, file_id } from ChatGPT). Got: ${JSON.stringify(image)}`
+    );
+  }
+  const fileRef = parsed.data;
 
   // A ChatGPT file reference — fetch the bytes from the temporary download
   // URL, then re-upload to the provider so we end up with a URL the
   // provider's own publish call can actually reach.
   let response: Response;
   try {
-    response = await fetch(image.download_url);
+    response = await fetch(fileRef.download_url);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     throw new Error(
@@ -63,10 +110,10 @@ async function resolveImageUrl(image: ImageInput, provider: SocialProvider): Pro
       `Failed to download the image from ChatGPT (status ${response.status}). The download_url may have expired — try re-attaching the image.`
     );
   }
-  const contentType = response.headers.get("content-type") ?? "application/octet-stream";
+  const contentType = fileRef.mime_type ?? response.headers.get("content-type") ?? "application/octet-stream";
   const bytes = new Uint8Array(await response.arrayBuffer());
   const extension = contentType.split("/")[1]?.split(";")[0] || "bin";
-  const filename = `${image.file_id ?? "chatgpt-image"}.${extension}`;
+  const filename = fileRef.file_name ?? `${fileRef.file_id ?? "chatgpt-image"}.${extension}`;
 
   const publicUrl = await provider.uploadMediaFromBytes(bytes, filename, contentType);
   return [publicUrl];
