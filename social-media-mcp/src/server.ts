@@ -17,6 +17,7 @@ import { z } from "zod";
 import { BRANDS, BRAND_KEYS, getBrandOrThrow, resolveAccount } from "./brands.js";
 import { composeCaption, createDraft, getDraft } from "./drafts.js";
 import { getProvider, PLATFORMS, type SocialProvider } from "./providers/index.js";
+import { POST_COMPOSER_HTML, POST_COMPOSER_TEMPLATE_URI } from "./widgets/postComposerWidget.js";
 
 const BrandKeySchema = z.enum(BRAND_KEYS);
 const PlatformSchema = z.enum(PLATFORMS);
@@ -121,6 +122,62 @@ async function resolveImageUrl(image: ImageInput, provider: SocialProvider): Pro
 
 export function createServer(): McpServer {
   const server = new McpServer({ name: "social-media-mcp", version: "1.0.0" });
+
+  // ---------------------------------------------------------------------------
+  // Post composer widget — a ChatGPT UI component that lets the user attach an
+  // image (generated in this chat, from the ChatGPT file library, or uploaded
+  // fresh) via window.openai.uploadFile/selectFiles + getFileDownloadUrl,
+  // then calls publishPost itself. This exists specifically to route around
+  // the openai/fileParams rewrite step in resolveImageUrl() above, which is
+  // unreliable for images that weren't explicitly attached as a file — see
+  // the comment at the top of src/widgets/postComposerWidget.ts for the full
+  // story. Prefer this tool over createPost/publishPost whenever the user
+  // wants to attach an image from the current conversation.
+  // ---------------------------------------------------------------------------
+  server.registerResource("post-composer-widget", POST_COMPOSER_TEMPLATE_URI, {}, async () => ({
+    contents: [
+      {
+        uri: POST_COMPOSER_TEMPLATE_URI,
+        mimeType: "text/html;profile=mcp-app",
+        text: POST_COMPOSER_HTML,
+        _meta: { ui: { prefersBorder: true } }
+      }
+    ]
+  }));
+
+  server.registerTool(
+    "openPostComposer",
+    {
+      title: "Open post composer",
+      description:
+        "Open an interactive widget for composing and publishing a social media post, with a built-in image " +
+          "picker (choose from the ChatGPT file library, or upload a file directly). Prefer this over " +
+          "createPost/publishPost whenever the post needs an image that was generated or attached in this " +
+          "conversation — passing that image as a normal tool argument can fail with an opaque file-handling " +
+          "error; this widget uploads the image through a more reliable path and publishes it itself.",
+      inputSchema: {
+        brand: BrandKeySchema.optional().describe("Pre-select a brand. Optional — the widget also lets the user pick one.")
+      },
+      _meta: {
+        ui: { resourceUri: POST_COMPOSER_TEMPLATE_URI },
+        "openai/outputTemplate": POST_COMPOSER_TEMPLATE_URI,
+        "openai/toolInvocation/invoking": "Opening post composer…",
+        "openai/toolInvocation/invoked": "Composer ready."
+      }
+    },
+    async ({ brand }) => {
+      if (brand) getBrandOrThrow(brand);
+      return {
+        structuredContent: { brand: brand ?? null },
+        content: [
+          {
+            type: "text",
+            text: "Opened the post composer. Attach an image, write the caption, pick platforms, and publish — all inside this widget."
+          }
+        ]
+      };
+    }
+  );
 
   // ---------------------------------------------------------------------------
   // listBrands
