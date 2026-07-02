@@ -1,0 +1,25 @@
+{
+  "name": "social-media-mcp",
+  "version": "1.0.0",
+  "description": "Generic MCP server for creating, publishing, scheduling, and analyzing social media posts across brands. Blotato is the first provider; the publishing layer is abstracted so other providers (Buffer, Metricool, Hootsuite, Meta) can be added without changing the MCP tool surface. Ships with both a stdio entrypoint (Claude Desktop/Cursor) and a Streamable HTTP entrypoint (ChatGPT and other remote MCP clients).",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "start:http": "node dist/http.js",
+    "dev": "tsx src/index.ts",
+    "dev:http": "tsx src/http.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "latest",
+    "express": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/express": "latest",
+    "@types/node": "latest",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}
